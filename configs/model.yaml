@@ -1,0 +1,16 @@
+model:
+  kind: hist_gradient_boosting
+  random_state: 42
+  n_splits: 5
+  learning_rate: 0.05
+  max_iter: 350
+  max_leaf_nodes: 31
+  min_samples_leaf: 20
+  l2_regularization: 1.0
+
+features:
+  # 위성 특징 파일이 없어도 B1 기준 모델이 학습됩니다.
+  include_satellite: true
+  categorical_columns: [STN_ID]
+  drop_columns: [date, TA, HM]
+

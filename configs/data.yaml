@@ -1,0 +1,45 @@
+project:
+  station_list: data/metadata/station_list.csv
+  sample_submission: data/metadata/sample_submission.csv
+  raw_asos_dir: data/raw/asos
+  parsed_asos_dir: data/interim/asos
+  raw_gk2a_dir: data/raw/gk2a
+  satellite_feature_dir: data/interim/satellite_features
+  processed_dataset: data/processed/train.csv
+
+asos:
+  observation_hour_kst: 14
+  timeout_seconds: 30
+  max_retries: 3
+  retry_backoff_seconds: 1.0
+  request_interval_seconds: 0.2
+
+satellite:
+  channels:
+    - VI004
+    - VI005
+    - VI006
+    - VI008
+    - NR013
+    - NR016
+    - SW038
+    - WV063
+    - WV069
+    - WV073
+    - IR087
+    - IR096
+    - IR105
+    - IR112
+    - IR123
+    - IR133
+  area: KO
+  # GK-2A 파일명·API 요청 시각은 UTC 기준입니다.
+  # 매일 14:00 KST 자료는 05:00 UTC로 요청합니다.
+  api_time_basis: utc
+  timeout_seconds: 90
+  max_retries: 3
+  retry_backoff_seconds: 2.0
+  request_interval_seconds: 0.2
+  minimum_file_bytes: 10000
+  # 실제 거리 기준. 채널 해상도에 따라 0.5/1/2km 픽셀 반경으로 자동 변환합니다.
+  patch_radii_km: [0, 5, 15]

@@ -1,0 +1,19 @@
+Official station_list -> GK-2A LE1B KO pixel validation
+stations=96
+source_columns=STN_ID,LAT,LON,ALT (competition official)
+VI004: resolution=1km shape=(1800, 1800) inside=96/96
+VI005: resolution=1km shape=(1800, 1800) inside=96/96
+VI006: resolution=0.5km shape=(3600, 3600) inside=96/96
+VI008: resolution=1km shape=(1800, 1800) inside=96/96
+NR013: resolution=2km shape=(900, 900) inside=96/96
+NR016: resolution=2km shape=(900, 900) inside=96/96
+SW038: resolution=2km shape=(900, 900) inside=96/96
+WV063: resolution=2km shape=(900, 900) inside=96/96
+WV069: resolution=2km shape=(900, 900) inside=96/96
+WV073: resolution=2km shape=(900, 900) inside=96/96
+IR087: resolution=2km shape=(900, 900) inside=96/96
+IR096: resolution=2km shape=(900, 900) inside=96/96
+IR105: resolution=2km shape=(900, 900) inside=96/96
+IR112: resolution=2km shape=(900, 900) inside=96/96
+IR123: resolution=2km shape=(900, 900) inside=96/96
+IR133: resolution=2km shape=(900, 900) inside=96/96

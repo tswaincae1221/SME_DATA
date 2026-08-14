@@ -1,0 +1,26 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# API 원본·가공 데이터
+data/raw/*
+!data/raw/.gitkeep
+data/interim/*
+!data/interim/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# 모델과 실행 결과
+models/*
+!models/.gitkeep
+outputs/submissions/*
+!outputs/submissions/.gitkeep
+outputs/kaggle_dataset/
+outputs/kaggle_dataset.zip
+*.log
+
+# 노트북 임시 파일
+.ipynb_checkpoints/
