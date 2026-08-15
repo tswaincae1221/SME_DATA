@@ -12,6 +12,10 @@
 
 처음 참여하는 팀원은 [GETTING_STARTED.md](GETTING_STARTED.md)를 먼저 읽어주세요. API 없이도 아래 순서로 전체 파이프라인을 연습할 수 있습니다.
 
+Google Drive에 업로드한 대량 NC를 Colab에서 전처리하려면
+[`notebooks/Colab_Drive_NC_Preprocessing.ipynb`](notebooks/Colab_Drive_NC_Preprocessing.ipynb)을 사용합니다.
+경로 설정과 결과 파일 설명은 [COLAB_DRIVE_PREPROCESSING.md](COLAB_DRIVE_PREPROCESSING.md)에 있습니다.
+
 ```bash
 pip install -r requirements.txt
 pip install -e .
