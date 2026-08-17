@@ -15,6 +15,9 @@ from gk2a_weather.data.stations import load_station_list
 from gk2a_weather.utils.io import atomic_write_csv, atomic_write_text
 
 
+FAILURE_COLUMNS = ["kind", "date_kst", "time_kst", "channel", "error"]
+
+
 def time_grid(day: pd.Timestamp, start_hhmm: str, end_hhmm: str, step_minutes: int):
     sh, sm = map(int, start_hhmm.split(":"))
     eh, em = map(int, end_hhmm.split(":"))
@@ -86,7 +89,13 @@ def main() -> None:
                             session=session,
                         )
                     except (DownloadError, OSError, ValueError) as exc:
-                        failures.append({"kind":"GK2A","date_kst":day.strftime("%Y-%m-%d"),"time_kst":timestamp_kst.strftime("%H:%M"),"channel":channel,"error":str(exc)})
+                        failures.append({
+                            "kind": "GK2A",
+                            "date_kst": day.strftime("%Y-%m-%d"),
+                            "time_kst": timestamp_kst.strftime("%H:%M"),
+                            "channel": channel,
+                            "error": str(exc),
+                        })
                     wait = float(satellite["request_interval_seconds"])
                     if wait > 0:
                         time.sleep(wait)
@@ -113,11 +122,19 @@ def main() -> None:
                 frame = frame[frame["STN_ID"].isin(allowed_ids)].copy()
                 atomic_write_csv(frame, parsed_path)
             except Exception as exc:
-                failures.append({"kind":"ASOS","date_kst":day.strftime("%Y-%m-%d"),"time_kst":"14:00","channel":"TA/HM","error":str(exc)})
+                failures.append({
+                    "kind": "ASOS",
+                    "date_kst": day.strftime("%Y-%m-%d"),
+                    "time_kst": "14:00",
+                    "channel": "TA/HM",
+                    "error": str(exc),
+                })
 
     failure_path = output_dir / "shortterm_collection_failures.csv"
-    atomic_write_csv(pd.DataFrame(failures), failure_path)
-    print(f"done; failures={len(failures)} -> {failure_path}")
+    # 실패가 0건이어도 헤더가 있는 CSV를 저장해 pandas EmptyDataError를 방지한다.
+    failure_frame = pd.DataFrame(failures, columns=FAILURE_COLUMNS)
+    atomic_write_csv(failure_frame, failure_path)
+    print(f"done; failures={len(failure_frame)} -> {failure_path}")
 
 
 if __name__ == "__main__":
