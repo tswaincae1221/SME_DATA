@@ -59,20 +59,39 @@ def main() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     failures = []
+    downloaded = 0
+    cached = 0
+    failed = 0
+
     try:
         import requests
     except ImportError as exc:
         raise RuntimeError("requests is required") from exc
 
+    channels = [str(c).upper() for c in satellite["channels"]]
+    print(
+        f"[START] {args.start} ~ {args.end} | {args.start_time}~{args.end_time} KST "
+        f"| step={args.step_minutes}m | channels={len(channels)}",
+        flush=True,
+    )
+
     with requests.Session() as session:
         for day in inclusive_dates(args.start, args.end):
+            print(f"\n[DAY] {day.strftime('%Y-%m-%d')}", flush=True)
+
             for timestamp_kst in time_grid(day, args.start_time, args.end_time, args.step_minutes):
                 requested = api_timestamp(timestamp_kst, str(satellite["api_time_basis"]))
-                for channel_value in satellite["channels"]:
-                    channel = str(channel_value).upper()
+                print(
+                    f"  [TIME] {timestamp_kst.strftime('%H:%M')} KST -> API {requested} "
+                    f"| downloaded={downloaded} cached={cached} failed={failed}",
+                    flush=True,
+                )
+
+                for channel in channels:
                     output_path = canonical_gk2a_path(sat_root, day, channel, requested)
                     min_bytes = int(satellite["minimum_file_bytes"])
                     if output_path.exists() and output_path.stat().st_size >= min_bytes and not args.force:
+                        cached += 1
                         continue
                     try:
                         download_gk2a_channel(
@@ -88,7 +107,9 @@ def main() -> None:
                             minimum_file_bytes=min_bytes,
                             session=session,
                         )
+                        downloaded += 1
                     except (DownloadError, OSError, ValueError) as exc:
+                        failed += 1
                         failures.append({
                             "kind": "GK2A",
                             "date_kst": day.strftime("%Y-%m-%d"),
@@ -96,6 +117,10 @@ def main() -> None:
                             "channel": channel,
                             "error": str(exc),
                         })
+                        print(
+                            f"    [FAIL] {channel} {timestamp_kst.strftime('%H:%M')} | {exc}",
+                            flush=True,
+                        )
                     wait = float(satellite["request_interval_seconds"])
                     if wait > 0:
                         time.sleep(wait)
@@ -104,6 +129,7 @@ def main() -> None:
             key = label_ts.strftime("%Y%m%d%H%M")
             raw_path = asos_raw_root / f"asos_{key}.txt"
             parsed_path = asos_parsed_root / f"asos_{key}.csv"
+            print("  [ASOS] 14:00 TA/HM", flush=True)
             try:
                 if parsed_path.exists() and not args.force:
                     frame = pd.read_csv(parsed_path)
@@ -121,6 +147,7 @@ def main() -> None:
                     atomic_write_text(raw_path, text)
                 frame = frame[frame["STN_ID"].isin(allowed_ids)].copy()
                 atomic_write_csv(frame, parsed_path)
+                print(f"    [OK] ASOS rows={len(frame)}", flush=True)
             except Exception as exc:
                 failures.append({
                     "kind": "ASOS",
@@ -129,12 +156,16 @@ def main() -> None:
                     "channel": "TA/HM",
                     "error": str(exc),
                 })
+                print(f"    [FAIL] ASOS | {exc}", flush=True)
 
     failure_path = output_dir / "shortterm_collection_failures.csv"
-    # 실패가 0건이어도 헤더가 있는 CSV를 저장해 pandas EmptyDataError를 방지한다.
     failure_frame = pd.DataFrame(failures, columns=FAILURE_COLUMNS)
     atomic_write_csv(failure_frame, failure_path)
-    print(f"done; failures={len(failure_frame)} -> {failure_path}")
+    print(
+        f"\n[DONE] downloaded={downloaded} cached={cached} failed={len(failure_frame)} "
+        f"-> {failure_path}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
