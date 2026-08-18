@@ -11,6 +11,7 @@ import pandas as pd
 
 
 DEFAULT_YEARS = list(range(2019, 2026))
+FAILURE_COLUMNS = ["kind", "date_kst", "time_kst", "channel", "error"]
 
 
 def parse_mmdd(value: str) -> tuple[int, int]:
@@ -42,11 +43,65 @@ def safe_read_csv(path: Path, *, columns: list[str] | None = None) -> pd.DataFra
         return pd.DataFrame(columns=columns or [])
 
 
+def year_paths(by_year_root: Path, year: int) -> dict[str, Path]:
+    year_dir = by_year_root / str(year)
+    return {
+        "dir": year_dir,
+        "long": year_dir / "shortterm_long.csv",
+        "wide": year_dir / "shortterm_wide.csv",
+        "labels": year_dir / "shortterm_labels_1400.csv",
+        "missing": year_dir / "shortterm_build_missing.csv",
+    }
+
+
+def built_output_status(by_year_root: Path, year: int, expected_days: int, expected_steps: int) -> tuple[bool, str]:
+    paths = year_paths(by_year_root, year)
+    required = [paths["long"], paths["wide"], paths["labels"]]
+    if not all(path.exists() and path.stat().st_size > 0 for path in required):
+        return False, "required CSV missing"
+
+    try:
+        long_df = safe_read_csv(paths["long"])
+        wide_df = safe_read_csv(paths["wide"])
+        labels_df = safe_read_csv(paths["labels"])
+        if long_df.empty or wide_df.empty or labels_df.empty:
+            return False, "one or more CSVs empty"
+        if not {"Date", "STN_ID", "TimeKST"}.issubset(long_df.columns):
+            return False, "long CSV columns invalid"
+        if not {"Date", "STN_ID", "TA", "HM"}.issubset(wide_df.columns):
+            return False, "wide CSV columns invalid"
+        if long_df["Date"].nunique() != expected_days or wide_df["Date"].nunique() != expected_days:
+            return False, "date count incomplete"
+        counts = long_df.groupby(["Date", "STN_ID"])["TimeKST"].nunique()
+        if counts.empty or int(counts.min()) != expected_steps or int(counts.max()) != expected_steps:
+            return False, "timestep count incomplete"
+        if len(long_df) != len(wide_df) * expected_steps:
+            return False, "long/wide row count mismatch"
+        if len(labels_df) != len(wide_df):
+            return False, "label/wide row count mismatch"
+    except Exception as exc:
+        return False, f"validation error: {exc}"
+
+    issues = len(safe_read_csv(paths["missing"]))
+    if issues:
+        return True, f"built outputs valid; WARNING build_issues={issues}"
+    return True, "built outputs valid"
+
+
+def add_year_column(frame: pd.DataFrame, year: int) -> pd.DataFrame:
+    out = frame.copy()
+    if "Year" in out.columns:
+        out["Year"] = year
+    else:
+        out.insert(0, "Year", year)
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "2019~2025 등 여러 연도의 8/24~8/30 short-term 위성 자료를 수집하고, "
-            "지점별 tabular 데이터 및 14:00 TA/HM 라벨까지 자동 병합합니다."
+            "여러 연도의 short-term 위성 자료를 수집하고 tabular/long 데이터와 "
+            "14:00 TA/HM 라벨을 자동 병합합니다. 재실행 시 이미 build가 끝난 연도는 건너뜁니다."
         )
     )
     parser.add_argument("--years", nargs="+", type=int, default=DEFAULT_YEARS)
@@ -58,15 +113,12 @@ def main() -> None:
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--config", default="configs/data.yaml")
     parser.add_argument("--station-list", default="")
+    parser.add_argument("--skip-collection", action="store_true")
+    parser.add_argument("--skip-build", action="store_true")
     parser.add_argument(
-        "--skip-collection",
+        "--rebuild-existing-years",
         action="store_true",
-        help="이미 원본 수집이 끝났다면 다운로드를 생략하고 전처리/병합만 수행",
-    )
-    parser.add_argument(
-        "--skip-build",
-        action="store_true",
-        help="수집만 하고 tabular 변환/라벨 병합은 생략",
+        help="이미 long/wide/labels가 완성된 연도도 다시 수집/전처리",
     )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -84,24 +136,44 @@ def main() -> None:
     output_logs = output_root / "outputs"
     output_logs.mkdir(parents=True, exist_ok=True)
 
-    all_long: list[pd.DataFrame] = []
-    all_wide: list[pd.DataFrame] = []
-    all_labels: list[pd.DataFrame] = []
-    all_build_missing: list[pd.DataFrame] = []
-    all_collection_failures: list[pd.DataFrame] = []
-    summary_rows: list[dict[str, object]] = []
+    start_month, start_day = args.start_mmdd
+    end_month, end_day = args.end_mmdd
+    example_year = years[0]
+    expected_days = len(pd.date_range(
+        f"{example_year:04d}-{start_month:02d}-{start_day:02d}",
+        f"{example_year:04d}-{end_month:02d}-{end_day:02d}",
+        freq="D",
+    ))
+    start_minutes = int(args.start_time[:2]) * 60 + int(args.start_time[3:])
+    end_minutes = int(args.end_time[:2]) * 60 + int(args.end_time[3:])
+    expected_steps = (end_minutes - start_minutes) // args.step_minutes + 1
 
+    print(
+        f"[MULTIYEAR] years={years} expected_days/year={expected_days} "
+        f"expected_steps/day={expected_steps}",
+        flush=True,
+    )
+
+    # 1) 필요한 연도만 수집/build. 이미 완성된 연도는 건너뛴다.
     for year in years:
         start_date = date_text(year, args.start_mmdd)
         end_date = date_text(year, args.end_mmdd)
-        print("\n" + "=" * 72)
-        print(f"{year}: {start_date} ~ {end_date} / {args.start_time}~{args.end_time}")
-        print("=" * 72)
+        paths = year_paths(by_year_root, year)
+        paths["dir"].mkdir(parents=True, exist_ok=True)
+
+        complete, status = built_output_status(by_year_root, year, expected_days, expected_steps)
+        print("\n" + "=" * 72, flush=True)
+        print(f"{year}: {start_date} ~ {end_date} / {args.start_time}~{args.end_time}", flush=True)
+        print(f"[STATUS] {status}", flush=True)
+        print("=" * 72, flush=True)
+
+        if complete and not args.rebuild_existing_years and not args.force:
+            print(f"[SKIP YEAR] {year}: 기존 long/wide/labels 재사용", flush=True)
+            continue
 
         if not args.skip_collection:
             collect_cmd = [
-                sys.executable,
-                "scripts/collect_shortterm_12to14.py",
+                sys.executable, "-u", "scripts/collect_shortterm_12to14.py",
                 "--start", start_date,
                 "--end", end_date,
                 "--start-time", args.start_time,
@@ -120,134 +192,102 @@ def main() -> None:
             yearly_failure = output_logs / f"collection_failures_{year}.csv"
             if latest_failure.exists():
                 shutil.copy2(latest_failure, yearly_failure)
-            failure_frame = safe_read_csv(
-                yearly_failure,
-                columns=["kind", "date_kst", "time_kst", "channel", "error"],
-            )
-            if len(failure_frame):
-                failure_frame.insert(0, "year", year)
-                all_collection_failures.append(failure_frame)
+            failure_frame = safe_read_csv(yearly_failure, columns=FAILURE_COLUMNS)
+            print(f"[COLLECTION RESULT] year={year} failures={len(failure_frame)}", flush=True)
         else:
             yearly_failure = output_logs / f"collection_failures_{year}.csv"
-            failure_frame = safe_read_csv(
-                yearly_failure,
-                columns=["kind", "date_kst", "time_kst", "channel", "error"],
-            )
-            if len(failure_frame):
-                failure_frame.insert(0, "year", year)
-                all_collection_failures.append(failure_frame)
-
-        year_dir = by_year_root / str(year)
-        year_dir.mkdir(parents=True, exist_ok=True)
+            failure_frame = safe_read_csv(yearly_failure, columns=FAILURE_COLUMNS)
 
         if not args.skip_build:
             build_cmd = [
-                sys.executable,
-                "scripts/build_shortterm_12to14_dataset.py",
+                sys.executable, "-u", "scripts/build_shortterm_12to14_dataset.py",
                 "--start", start_date,
                 "--end", end_date,
                 "--start-time", args.start_time,
                 "--end-time", args.end_time,
                 "--step-minutes", str(args.step_minutes),
                 "--input-root", str(output_root),
-                "--output-dir", str(year_dir),
+                "--output-dir", str(paths["dir"]),
                 "--config", args.config,
             ]
             if args.station_list:
                 build_cmd += ["--station-list", args.station_list]
+            print(f"[BUILD START] {year}", flush=True)
             run(build_cmd, cwd=repo_dir)
+            build_missing = safe_read_csv(paths["missing"])
+            print(f"[BUILD DONE] {year} issues={len(build_missing)}", flush=True)
 
-        long_path = year_dir / "shortterm_long.csv"
-        wide_path = year_dir / "shortterm_wide.csv"
-        labels_path = year_dir / "shortterm_labels_1400.csv"
-        missing_path = year_dir / "shortterm_build_missing.csv"
+    # 2) 기존 결과까지 포함해 요청된 모든 연도를 다시 합친다.
+    all_long: list[pd.DataFrame] = []
+    all_wide: list[pd.DataFrame] = []
+    all_labels: list[pd.DataFrame] = []
+    all_build_missing: list[pd.DataFrame] = []
+    all_collection_failures: list[pd.DataFrame] = []
+    summary_rows: list[dict[str, object]] = []
 
-        long_df = safe_read_csv(long_path)
-        wide_df = safe_read_csv(wide_path)
-        labels_df = safe_read_csv(labels_path)
-        missing_df = safe_read_csv(missing_path)
+    for year in years:
+        paths = year_paths(by_year_root, year)
+        long_df = safe_read_csv(paths["long"])
+        wide_df = safe_read_csv(paths["wide"])
+        labels_df = safe_read_csv(paths["labels"])
+        missing_df = safe_read_csv(paths["missing"])
+        yearly_failure = output_logs / f"collection_failures_{year}.csv"
+        failure_df = safe_read_csv(yearly_failure, columns=FAILURE_COLUMNS)
 
         if len(long_df):
-            long_df.insert(0, "Year", year)
-            all_long.append(long_df)
+            all_long.append(add_year_column(long_df, year))
         if len(wide_df):
-            wide_df.insert(0, "Year", year)
-            all_wide.append(wide_df)
+            all_wide.append(add_year_column(wide_df, year))
         if len(labels_df):
-            labels_df.insert(0, "Year", year)
-            all_labels.append(labels_df)
+            all_labels.append(add_year_column(labels_df, year))
         if len(missing_df):
-            missing_df.insert(0, "Year", year)
-            all_build_missing.append(missing_df)
+            all_build_missing.append(add_year_column(missing_df, year))
+        if len(failure_df):
+            all_collection_failures.append(add_year_column(failure_df, year))
 
-        label_missing_ta = int(labels_df["TA"].isna().sum()) if "TA" in labels_df else 0
-        label_missing_hm = int(labels_df["HM"].isna().sum()) if "HM" in labels_df else 0
-        summary_rows.append(
-            {
-                "year": year,
-                "start_date": start_date,
-                "end_date": end_date,
-                "long_rows": len(long_df),
-                "wide_rows": len(wide_df),
-                "label_rows": len(labels_df),
-                "TA_missing": label_missing_ta,
-                "HM_missing": label_missing_hm,
-                "build_issues": len(missing_df),
-                "collection_failures": len(failure_frame),
-            }
-        )
+        summary_rows.append({
+            "year": year,
+            "long_rows": len(long_df),
+            "wide_rows": len(wide_df),
+            "label_rows": len(labels_df),
+            "TA_missing": int(labels_df["TA"].isna().sum()) if "TA" in labels_df else 0,
+            "HM_missing": int(labels_df["HM"].isna().sum()) if "HM" in labels_df else 0,
+            "build_issues": len(missing_df),
+            "collection_failures": len(failure_df),
+        })
 
     combined_dir = output_root / "datasets" / "combined"
     combined_dir.mkdir(parents=True, exist_ok=True)
 
-    if all_long:
-        combined_long = pd.concat(all_long, ignore_index=True)
+    combined_long = pd.concat(all_long, ignore_index=True) if all_long else pd.DataFrame()
+    combined_wide = pd.concat(all_wide, ignore_index=True) if all_wide else pd.DataFrame()
+    combined_labels = pd.concat(all_labels, ignore_index=True) if all_labels else pd.DataFrame()
+
+    if len(combined_long):
         combined_long = combined_long.sort_values(["Date", "STN_ID", "TimeKST"]).reset_index(drop=True)
         combined_long.to_csv(combined_dir / "shortterm_long_2019to2025.csv", index=False)
-    else:
-        combined_long = pd.DataFrame()
-
-    if all_wide:
-        combined_wide = pd.concat(all_wide, ignore_index=True)
+    if len(combined_wide):
         combined_wide = combined_wide.sort_values(["Date", "STN_ID"]).reset_index(drop=True)
         combined_wide.to_csv(combined_dir / "shortterm_wide_2019to2025.csv", index=False)
-    else:
-        combined_wide = pd.DataFrame()
-
-    if all_labels:
-        combined_labels = pd.concat(all_labels, ignore_index=True)
+    if len(combined_labels):
         combined_labels = combined_labels.sort_values(["Date", "STN_ID"]).reset_index(drop=True)
         combined_labels.to_csv(combined_dir / "shortterm_labels_1400_2019to2025.csv", index=False)
-    else:
-        combined_labels = pd.DataFrame()
 
-    combined_missing = (
-        pd.concat(all_build_missing, ignore_index=True)
-        if all_build_missing
-        else pd.DataFrame(columns=["Year", "Date", "TimeKST", "channel", "reason"])
-    )
+    combined_missing = pd.concat(all_build_missing, ignore_index=True) if all_build_missing else pd.DataFrame(columns=["Year", "Date", "TimeKST", "channel", "reason"])
+    combined_failures = pd.concat(all_collection_failures, ignore_index=True) if all_collection_failures else pd.DataFrame(columns=["Year", *FAILURE_COLUMNS])
     combined_missing.to_csv(combined_dir / "shortterm_build_missing_2019to2025.csv", index=False)
-
-    combined_failures = (
-        pd.concat(all_collection_failures, ignore_index=True)
-        if all_collection_failures
-        else pd.DataFrame(columns=["year", "kind", "date_kst", "time_kst", "channel", "error"])
-    )
     combined_failures.to_csv(combined_dir / "shortterm_collection_failures_2019to2025.csv", index=False)
 
     summary = pd.DataFrame(summary_rows)
     summary.to_csv(combined_dir / "shortterm_multiyear_summary.csv", index=False)
 
-    print("\n" + "=" * 72)
-    print("MULTI-YEAR PIPELINE COMPLETE")
-    print("=" * 72)
-    print(summary.to_string(index=False))
-    print(f"\ncombined long : {combined_long.shape}")
-    print(f"combined wide : {combined_wide.shape}")
-    print(f"combined labels: {combined_labels.shape}")
-    print(f"collection failures: {len(combined_failures)}")
-    print(f"build issues: {len(combined_missing)}")
-    print(f"output: {combined_dir}")
+    print("\n" + "=" * 72, flush=True)
+    print("MULTI-YEAR PIPELINE COMPLETE", flush=True)
+    print("=" * 72, flush=True)
+    print(summary.to_string(index=False), flush=True)
+    print(f"combined long={combined_long.shape} wide={combined_wide.shape} labels={combined_labels.shape}", flush=True)
+    print(f"collection failures={len(combined_failures)} build issues={len(combined_missing)}", flush=True)
+    print(f"output={combined_dir}", flush=True)
 
 
 if __name__ == "__main__":
