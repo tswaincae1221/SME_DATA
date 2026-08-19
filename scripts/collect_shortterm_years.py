@@ -105,6 +105,7 @@ def main() -> None:
         )
     )
     parser.add_argument("--years", nargs="+", type=int, default=DEFAULT_YEARS)
+    parser.add_argument("--skip-years", nargs="*", type=int, default=[], help="수집/build만 강제로 건너뛸 연도. combined에는 포함")
     parser.add_argument("--start-mmdd", type=parse_mmdd, default=parse_mmdd("08-24"))
     parser.add_argument("--end-mmdd", type=parse_mmdd, default=parse_mmdd("08-30"))
     parser.add_argument("--start-time", default="12:00")
@@ -115,11 +116,7 @@ def main() -> None:
     parser.add_argument("--station-list", default="")
     parser.add_argument("--skip-collection", action="store_true")
     parser.add_argument("--skip-build", action="store_true")
-    parser.add_argument(
-        "--rebuild-existing-years",
-        action="store_true",
-        help="이미 long/wide/labels가 완성된 연도도 다시 수집/전처리",
-    )
+    parser.add_argument("--rebuild-existing-years", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -128,6 +125,10 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
 
     years = sorted(dict.fromkeys(args.years))
+    skip_years = set(args.skip_years)
+    unknown_skip = skip_years.difference(years)
+    if unknown_skip:
+        raise ValueError(f"--skip-years contains years not in --years: {sorted(unknown_skip)}")
     if not years:
         raise ValueError("최소 한 개 연도를 지정해야 합니다.")
 
@@ -149,21 +150,27 @@ def main() -> None:
     expected_steps = (end_minutes - start_minutes) // args.step_minutes + 1
 
     print(
-        f"[MULTIYEAR] years={years} expected_days/year={expected_days} "
-        f"expected_steps/day={expected_steps}",
+        f"[MULTIYEAR] years={years} skip_years={sorted(skip_years)} "
+        f"expected_days/year={expected_days} expected_steps/day={expected_steps}",
         flush=True,
     )
 
-    # 1) 필요한 연도만 수집/build. 이미 완성된 연도는 건너뛴다.
+    # Phase 1: collection/build. Explicitly skipped years are untouched here.
     for year in years:
         start_date = date_text(year, args.start_mmdd)
         end_date = date_text(year, args.end_mmdd)
         paths = year_paths(by_year_root, year)
         paths["dir"].mkdir(parents=True, exist_ok=True)
 
-        complete, status = built_output_status(by_year_root, year, expected_days, expected_steps)
         print("\n" + "=" * 72, flush=True)
         print(f"{year}: {start_date} ~ {end_date} / {args.start_time}~{args.end_time}", flush=True)
+
+        if year in skip_years:
+            print(f"[SKIP YEAR - EXPLICIT] {year}: 수집/build 생략, 기존 by_year 결과를 combined에 재사용", flush=True)
+            print("=" * 72, flush=True)
+            continue
+
+        complete, status = built_output_status(by_year_root, year, expected_days, expected_steps)
         print(f"[STATUS] {status}", flush=True)
         print("=" * 72, flush=True)
 
@@ -194,9 +201,6 @@ def main() -> None:
                 shutil.copy2(latest_failure, yearly_failure)
             failure_frame = safe_read_csv(yearly_failure, columns=FAILURE_COLUMNS)
             print(f"[COLLECTION RESULT] year={year} failures={len(failure_frame)}", flush=True)
-        else:
-            yearly_failure = output_logs / f"collection_failures_{year}.csv"
-            failure_frame = safe_read_csv(yearly_failure, columns=FAILURE_COLUMNS)
 
         if not args.skip_build:
             build_cmd = [
@@ -217,7 +221,7 @@ def main() -> None:
             build_missing = safe_read_csv(paths["missing"])
             print(f"[BUILD DONE] {year} issues={len(build_missing)}", flush=True)
 
-    # 2) 기존 결과까지 포함해 요청된 모든 연도를 다시 합친다.
+    # Phase 2: combine ALL requested years, including explicit skips.
     all_long: list[pd.DataFrame] = []
     all_wide: list[pd.DataFrame] = []
     all_labels: list[pd.DataFrame] = []
@@ -254,6 +258,7 @@ def main() -> None:
             "HM_missing": int(labels_df["HM"].isna().sum()) if "HM" in labels_df else 0,
             "build_issues": len(missing_df),
             "collection_failures": len(failure_df),
+            "explicitly_skipped": year in skip_years,
         })
 
     combined_dir = output_root / "datasets" / "combined"
