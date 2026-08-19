@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+from _common import inclusive_dates
+from gk2a_weather.config import load_yaml
+from gk2a_weather.data.gk2a import api_timestamp, canonical_gk2a_path
+
+
+def time_grid(day: pd.Timestamp, start_hhmm: str, end_hhmm: str, step_minutes: int):
+    sh, sm = map(int, start_hhmm.split(":"))
+    eh, em = map(int, end_hhmm.split(":"))
+    current = day.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    end = day.replace(hour=eh, minute=em, second=0, microsecond=0)
+    while current <= end:
+        yield current.to_pydatetime()
+        current += pd.Timedelta(minutes=step_minutes)
+
+
+def run(cmd: list[str], cwd: Path) -> None:
+    print("\n$", " ".join(cmd), flush=True)
+    subprocess.run(cmd, cwd=cwd, check=True)
+
+
+def expected_year_status(year: int, args, config: dict) -> dict:
+    output_root = Path(args.output_root).expanduser().resolve()
+    raw_root = output_root / "raw_gk2a"
+    asos_root = output_root / "asos" / "parsed"
+    satellite = config["satellite"]
+    channels = [str(c).upper() for c in satellite["channels"]]
+    min_bytes = int(satellite["minimum_file_bytes"])
+
+    start = f"{year}-{args.start_mmdd}"
+    end = f"{year}-{args.end_mmdd}"
+    expected_nc = 0
+    valid_nc = 0
+    missing_examples: list[str] = []
+
+    for day in inclusive_dates(start, end):
+        for ts in time_grid(day, args.start_time, args.end_time, args.step_minutes):
+            requested = api_timestamp(ts, str(satellite["api_time_basis"]))
+            for channel in channels:
+                expected_nc += 1
+                path = canonical_gk2a_path(raw_root, day, channel, requested)
+                if path.exists() and path.stat().st_size >= min_bytes:
+                    valid_nc += 1
+                elif len(missing_examples) < 8:
+                    missing_examples.append(str(path))
+
+    expected_asos = len(list(inclusive_dates(start, end)))
+    valid_asos = 0
+    for day in inclusive_dates(start, end):
+        key = day.replace(hour=14, minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M")
+        path = asos_root / f"asos_{key}.csv"
+        if path.exists() and path.stat().st_size > 0:
+            valid_asos += 1
+
+    return {
+        "year": year,
+        "valid_nc": valid_nc,
+        "expected_nc": expected_nc,
+        "valid_asos": valid_asos,
+        "expected_asos": expected_asos,
+        "complete": valid_nc == expected_nc and valid_asos == expected_asos,
+        "missing_examples": missing_examples,
+    }
+
+
+def safe_read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def collect_phase(args, config: dict, repo_dir: Path) -> None:
+    root = Path(args.output_root).expanduser().resolve()
+    outputs = root / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    status_rows = []
+
+    for year in args.years:
+        before = expected_year_status(year, args, config)
+        print("\n" + "=" * 80, flush=True)
+        print(
+            f"[CHECK] {year}: GK2A {before['valid_nc']}/{before['expected_nc']} | "
+            f"ASOS {before['valid_asos']}/{before['expected_asos']}",
+            flush=True,
+        )
+
+        if before["complete"]:
+            print(f"[SKIP DOWNLOAD] {year}: 원본 데이터가 이미 모두 존재합니다.", flush=True)
+            after = before
+        else:
+            print(f"[RESUME DOWNLOAD] {year}: 없는/불완전한 원본만 이어받습니다.", flush=True)
+            cmd = [
+                sys.executable, "-u", "scripts/collect_shortterm_12to14.py",
+                "--start", f"{year}-{args.start_mmdd}",
+                "--end", f"{year}-{args.end_mmdd}",
+                "--start-time", args.start_time,
+                "--end-time", args.end_time,
+                "--step-minutes", str(args.step_minutes),
+                "--output-root", str(root),
+                "--config", args.config,
+            ]
+            if args.station_list:
+                cmd += ["--station-list", args.station_list]
+            run(cmd, repo_dir)
+
+            latest = outputs / "shortterm_collection_failures.csv"
+            yearly = outputs / f"collection_failures_{year}.csv"
+            if latest.exists():
+                shutil.copy2(latest, yearly)
+            after = expected_year_status(year, args, config)
+
+        print(
+            f"[AFTER] {year}: GK2A {after['valid_nc']}/{after['expected_nc']} | "
+            f"ASOS {after['valid_asos']}/{after['expected_asos']} | complete={after['complete']}",
+            flush=True,
+        )
+        status_rows.append({k: v for k, v in after.items() if k != "missing_examples"})
+
+        # If this year still failed after retries, stop here rather than hammering later years.
+        if not after["complete"]:
+            print("[STOP] 이 연도의 원본이 아직 불완전합니다. 같은 collect 명령을 다시 실행하면 이어받습니다.", flush=True)
+            if after["missing_examples"]:
+                print("missing examples:", *after["missing_examples"], sep="\n  - ", flush=True)
+            break
+
+    status = pd.DataFrame(status_rows)
+    status_path = outputs / "multiyear_collection_status.csv"
+    status.to_csv(status_path, index=False)
+    print(f"\ncollection status -> {status_path}", flush=True)
+
+    full_status = pd.DataFrame([expected_year_status(y, args, config) for y in args.years])
+    printable = full_status.drop(columns=["missing_examples"])
+    print("\n=== CURRENT COLLECTION STATUS ===", flush=True)
+    print(printable.to_string(index=False), flush=True)
+    all_complete = bool(full_status["complete"].all())
+    print(f"\nALL_COLLECTION_COMPLETE={all_complete}", flush=True)
+
+
+def combine_years(args) -> None:
+    root = Path(args.output_root).expanduser().resolve()
+    by_year = root / "datasets" / "by_year"
+    combined = root / "datasets" / "combined"
+    combined.mkdir(parents=True, exist_ok=True)
+
+    longs, wides, labels, missings = [], [], [], []
+    summary = []
+    for year in args.years:
+        d = by_year / str(year)
+        long_df = safe_read_csv(d / "shortterm_long.csv")
+        wide_df = safe_read_csv(d / "shortterm_wide.csv")
+        labels_df = safe_read_csv(d / "shortterm_labels_1400.csv")
+        missing_df = safe_read_csv(d / "shortterm_build_missing.csv")
+        for df in (long_df, wide_df, labels_df, missing_df):
+            if len(df) and "Year" not in df.columns:
+                df.insert(0, "Year", year)
+        if len(long_df): longs.append(long_df)
+        if len(wide_df): wides.append(wide_df)
+        if len(labels_df): labels.append(labels_df)
+        if len(missing_df): missings.append(missing_df)
+        summary.append({
+            "year": year,
+            "long_rows": len(long_df),
+            "wide_rows": len(wide_df),
+            "label_rows": len(labels_df),
+            "build_issues": len(missing_df),
+            "TA_missing": int(labels_df["TA"].isna().sum()) if "TA" in labels_df else 0,
+            "HM_missing": int(labels_df["HM"].isna().sum()) if "HM" in labels_df else 0,
+        })
+
+    if longs:
+        pd.concat(longs, ignore_index=True).sort_values(["Date", "STN_ID", "TimeKST"]).to_csv(
+            combined / "shortterm_long_2019to2025.csv", index=False
+        )
+    if wides:
+        pd.concat(wides, ignore_index=True).sort_values(["Date", "STN_ID"]).to_csv(
+            combined / "shortterm_wide_2019to2025.csv", index=False
+        )
+    if labels:
+        pd.concat(labels, ignore_index=True).sort_values(["Date", "STN_ID"]).to_csv(
+            combined / "shortterm_labels_1400_2019to2025.csv", index=False
+        )
+    (pd.concat(missings, ignore_index=True) if missings else pd.DataFrame()).to_csv(
+        combined / "shortterm_build_missing_2019to2025.csv", index=False
+    )
+    pd.DataFrame(summary).to_csv(combined / "shortterm_multiyear_summary.csv", index=False)
+    print(f"[COMBINE DONE] -> {combined}", flush=True)
+
+
+def build_phase(args, config: dict, repo_dir: Path) -> None:
+    statuses = [expected_year_status(y, args, config) for y in args.years]
+    incomplete = [s for s in statuses if not s["complete"]]
+    if incomplete:
+        msg = ", ".join(
+            f"{s['year']} GK2A={s['valid_nc']}/{s['expected_nc']} ASOS={s['valid_asos']}/{s['expected_asos']}"
+            for s in incomplete
+        )
+        raise RuntimeError("원본 수집이 아직 완료되지 않아 build를 중단합니다: " + msg)
+
+    root = Path(args.output_root).expanduser().resolve()
+    by_year = root / "datasets" / "by_year"
+    by_year.mkdir(parents=True, exist_ok=True)
+
+    print("[BUILD PHASE] 모든 원본 수집 완료 확인. 이제 tabular/long을 새로 생성합니다.", flush=True)
+    for year in args.years:
+        year_dir = by_year / str(year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        print("\n" + "=" * 80, flush=True)
+        print(f"[BUILD] {year}", flush=True)
+        cmd = [
+            sys.executable, "-u", "scripts/build_shortterm_12to14_dataset.py",
+            "--start", f"{year}-{args.start_mmdd}",
+            "--end", f"{year}-{args.end_mmdd}",
+            "--start-time", args.start_time,
+            "--end-time", args.end_time,
+            "--step-minutes", str(args.step_minutes),
+            "--input-root", str(root),
+            "--output-dir", str(year_dir),
+            "--config", args.config,
+        ]
+        if args.station_list:
+            cmd += ["--station-list", args.station_list]
+        run(cmd, repo_dir)
+
+    combine_years(args)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Collect all short-term raw data first; build tabular only after collection is complete")
+    p.add_argument("--phase", required=True, choices=["collect", "status", "build"])
+    p.add_argument("--years", nargs="+", type=int, default=list(range(2019, 2026)))
+    p.add_argument("--start-mmdd", default="08-24")
+    p.add_argument("--end-mmdd", default="08-30")
+    p.add_argument("--start-time", default="12:00")
+    p.add_argument("--end-time", default="14:00")
+    p.add_argument("--step-minutes", type=int, default=10)
+    p.add_argument("--output-root", required=True)
+    p.add_argument("--config", default="configs/data.yaml")
+    p.add_argument("--station-list", default="")
+    args = p.parse_args()
+
+    repo_dir = Path(__file__).resolve().parents[1]
+    config = load_yaml(args.config)
+
+    if args.phase == "collect":
+        collect_phase(args, config, repo_dir)
+    elif args.phase == "status":
+        rows = []
+        for year in args.years:
+            s = expected_year_status(year, args, config)
+            rows.append({k: v for k, v in s.items() if k != "missing_examples"})
+        df = pd.DataFrame(rows)
+        print(df.to_string(index=False))
+        print("ALL_COLLECTION_COMPLETE=", bool(df["complete"].all()))
+    else:
+        build_phase(args, config, repo_dir)
+
+
+if __name__ == "__main__":
+    main()
