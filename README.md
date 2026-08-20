@@ -20,6 +20,11 @@ python scripts/train_baseline.py --dataset data/processed/demo_train.csv --outpu
 python scripts/make_submission.py --features data/processed/demo_inference_features.csv --model models/demo.joblib --sample-submission data/metadata/demo_sample_submission.csv --output outputs/submissions/demo_submission.csv
 ```
 
+TA residual 모델의 최근 연도 OOF 보정과 HM CatBoost+residual LSTM 베이스라인은
+`notebooks/Colab_TA_HM_OOF_Calibrated_Baseline.ipynb`에서 실행한다. 공식 점수식,
+OOF 보정 상수, 규정 입력 검사 결과는 실행 폴더의 `competition_scores.csv`,
+`calibration_recipe.json`, `rule_compliance.json`에 저장된다.
+
 현재 코드는 ASOS 수집부터 날짜 그룹 검증, 모델 저장, `pred`·제출 파일 생성까지 구현되어 있습니다. GK-2A API·파일 시각은 UTC 기준으로 확인해 14:00 KST를 05:00 UTC로 요청하도록 설정했습니다. 위경도→픽셀 변환과 채널별 보정은 KO 표본 파일과 대회 `baseline_notebook.ipynb`로 추가 검증해야 합니다.
 
 ---
