@@ -1,0 +1,28 @@
+{
+  "TA": {
+    "base_column": "Exp2_CatResidualLSTM",
+    "calibration_method": "mean(actual_minus_prediction) from latest OOF year",
+    "latest_oof_year": 2024,
+    "additive_correction": 1.5826608106369637,
+    "test_base_RMSE": 1.9371061339975189,
+    "test_calibrated_RMSE": 1.7230341714438213,
+    "test_improved": true,
+    "test_RMSE_delta": -0.21407196255369754
+  },
+  "HM": {
+    "residual_scale": 1.26,
+    "calibration_candidates": [
+      "raw",
+      "offset",
+      "affine",
+      "affine_with_oof_TA"
+    ],
+    "selection_split": "forward meta-OOF: fit earlier OOF years, validate next OOF year",
+    "selected_calibration": "raw",
+    "TA_meta_feature": "TA_LatestOOFCalibrated (model prediction only)",
+    "output_clip": [
+      0.0,
+      100.0
+    ]
+  }
+}
