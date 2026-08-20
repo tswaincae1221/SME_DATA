@@ -1,0 +1,12 @@
+{
+  "raw_cat_weight": 0.76,
+  "raw_lstm_weight": 0.92,
+  "catboost_offset": 0.5972842048340857,
+  "ridge_offset": 0.11805788741746508,
+  "direct_lstm_offset": 0.5253278564088192,
+  "calibrated_cat_weight": 0.96,
+  "calibrated_lstm_weight": 0.9,
+  "no_ridge_lstm_weight": 0.9,
+  "residual_scale": 1.52,
+  "residual_final_offset": 0.6028503110119058
+}
