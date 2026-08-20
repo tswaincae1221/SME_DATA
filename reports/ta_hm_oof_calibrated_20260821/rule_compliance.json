@@ -1,0 +1,15 @@
+{
+  "allowed_inputs": [
+    "GK-2A LE1B KO 16 channels",
+    "official station LAT/LON/ALT",
+    "date/time/coordinate-derived calendar and solar values"
+  ],
+  "ASOS_usage": "TA and HM are labels only",
+  "ASOS_lag_or_recent_observation_input": false,
+  "HM_uses_observed_TA_as_input": false,
+  "HM_TA_meta_feature": "rolling OOF/frozen model-predicted TA only",
+  "external_weather_or_static_geography": false,
+  "HM_output_clipped_to_0_100": true,
+  "score_formula": "RMSE_TA + 0.1 * RMSE_HM",
+  "evaluation_note": "2025 is a retrospective holdout used repeatedly during development, not a pristine leaderboard estimate."
+}
