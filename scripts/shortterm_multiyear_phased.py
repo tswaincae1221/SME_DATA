@@ -25,7 +25,12 @@ def time_grid(day: pd.Timestamp, start_hhmm: str, end_hhmm: str, step_minutes: i
 
 def run(cmd: list[str], cwd: Path) -> None:
     print("\n$", " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=cwd, check=True)
+    try:
+        subprocess.run(cmd, cwd=cwd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"하위 명령이 exit code {exc.returncode}로 실패했습니다: {' '.join(cmd)}"
+        ) from exc
 
 
 def expected_year_status(year: int, args, config: dict) -> dict:
@@ -79,6 +84,22 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
+
+
+def yearly_build_is_reusable(year_dir: Path, source_complete: bool) -> bool:
+    """Return True only for a finished per-year build that is safe to reuse."""
+    required = (
+        year_dir / "shortterm_long.csv",
+        year_dir / "shortterm_wide.csv",
+        year_dir / "shortterm_labels_1400.csv",
+    )
+    if not all(path.exists() and path.stat().st_size > 1 for path in required):
+        return False
+
+    # A previous build may have been made before later downloads filled the raw gaps.
+    # Rebuild that year so stale NaNs do not remain in otherwise complete source data.
+    missing_df = safe_read_csv(year_dir / "shortterm_build_missing.csv")
+    return not (source_complete and len(missing_df) > 0)
 
 
 def collect_phase(args, config: dict, repo_dir: Path) -> None:
@@ -156,6 +177,7 @@ def combine_years(args) -> None:
 
     longs, wides, labels, missings = [], [], [], []
     summary = []
+    missing_dataset_years = []
     for year in args.years:
         d = by_year / str(year)
         long_df = safe_read_csv(d / "shortterm_long.csv")
@@ -169,6 +191,8 @@ def combine_years(args) -> None:
         if len(wide_df): wides.append(wide_df)
         if len(labels_df): labels.append(labels_df)
         if len(missing_df): missings.append(missing_df)
+        if not len(long_df) or not len(wide_df) or not len(labels_df):
+            missing_dataset_years.append(year)
         summary.append({
             "year": year,
             "long_rows": len(long_df),
@@ -179,20 +203,27 @@ def combine_years(args) -> None:
             "HM_missing": int(labels_df["HM"].isna().sum()) if "HM" in labels_df else 0,
         })
 
+    if missing_dataset_years:
+        raise RuntimeError(
+            "연도별 build 결과가 없어 combined CSV를 만들 수 없습니다: "
+            + ", ".join(map(str, missing_dataset_years))
+        )
+
+    year_tag = f"{min(args.years)}to{max(args.years)}"
     if longs:
         pd.concat(longs, ignore_index=True).sort_values(["Date", "STN_ID", "TimeKST"]).to_csv(
-            combined / "shortterm_long_2019to2025.csv", index=False
+            combined / f"shortterm_long_{year_tag}.csv", index=False
         )
     if wides:
         pd.concat(wides, ignore_index=True).sort_values(["Date", "STN_ID"]).to_csv(
-            combined / "shortterm_wide_2019to2025.csv", index=False
+            combined / f"shortterm_wide_{year_tag}.csv", index=False
         )
     if labels:
         pd.concat(labels, ignore_index=True).sort_values(["Date", "STN_ID"]).to_csv(
-            combined / "shortterm_labels_1400_2019to2025.csv", index=False
+            combined / f"shortterm_labels_1400_{year_tag}.csv", index=False
         )
     (pd.concat(missings, ignore_index=True) if missings else pd.DataFrame()).to_csv(
-        combined / "shortterm_build_missing_2019to2025.csv", index=False
+        combined / f"shortterm_build_missing_{year_tag}.csv", index=False
     )
     pd.DataFrame(summary).to_csv(combined / "shortterm_multiyear_summary.csv", index=False)
     print(f"[COMBINE DONE] -> {combined}", flush=True)
@@ -200,23 +231,57 @@ def combine_years(args) -> None:
 
 def build_phase(args, config: dict, repo_dir: Path) -> None:
     statuses = [expected_year_status(y, args, config) for y in args.years]
+    root = Path(args.output_root).expanduser().resolve()
+    outputs = root / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [{k: v for k, v in status.items() if k != "missing_examples"} for status in statuses]
+    ).to_csv(outputs / "build_preflight_status.csv", index=False)
+
     incomplete = [s for s in statuses if not s["complete"]]
     if incomplete:
         msg = ", ".join(
             f"{s['year']} GK2A={s['valid_nc']}/{s['expected_nc']} ASOS={s['valid_asos']}/{s['expected_asos']}"
             for s in incomplete
         )
-        raise RuntimeError("원본 수집이 아직 완료되지 않아 build를 중단합니다: " + msg)
+        if not args.allow_incomplete:
+            raise RuntimeError(
+                "원본 수집이 아직 완료되지 않아 build를 중단합니다: "
+                + msg
+                + "\nPhase 1을 다시 실행하거나, 누락 채널을 NaN으로 기록해 진행하려면 "
+                "--allow-incomplete를 지정하세요."
+            )
+        print(
+            "[BUILD PRECHECK WARNING] 불완전한 원본을 허용합니다. "
+            "누락 채널은 NaN으로 저장되고 shortterm_build_missing CSV에 기록됩니다.",
+            flush=True,
+        )
+        print("[INCOMPLETE] " + msg, flush=True)
+        for status in incomplete:
+            if status["missing_examples"]:
+                print(
+                    f"[{status['year']} missing examples]",
+                    *status["missing_examples"],
+                    sep="\n  - ",
+                    flush=True,
+                )
+    else:
+        print("[BUILD PRECHECK] 모든 원본 수집 완료.", flush=True)
 
-    root = Path(args.output_root).expanduser().resolve()
     by_year = root / "datasets" / "by_year"
     by_year.mkdir(parents=True, exist_ok=True)
 
-    print("[BUILD PHASE] 모든 원본 수집 완료 확인. 이제 tabular/long을 새로 생성합니다.", flush=True)
+    status_by_year = {status["year"]: status for status in statuses}
+    print("[BUILD PHASE] tabular/long 생성을 시작합니다.", flush=True)
     for year in args.years:
         year_dir = by_year / str(year)
         year_dir.mkdir(parents=True, exist_ok=True)
         print("\n" + "=" * 80, flush=True)
+        if args.resume_build and yearly_build_is_reusable(
+            year_dir, bool(status_by_year[year]["complete"])
+        ):
+            print(f"[SKIP BUILD] {year}: 기존 연도별 결과를 재사용합니다.", flush=True)
+            continue
         print(f"[BUILD] {year}", flush=True)
         cmd = [
             sys.executable, "-u", "scripts/build_shortterm_12to14_dataset.py",
@@ -237,7 +302,9 @@ def build_phase(args, config: dict, repo_dir: Path) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Collect all short-term raw data first; build tabular only after collection is complete")
+    p = argparse.ArgumentParser(
+        description="Collect short-term raw data and build per-year/combined tabular datasets"
+    )
     p.add_argument("--phase", required=True, choices=["collect", "status", "build"])
     p.add_argument("--years", nargs="+", type=int, default=list(range(2019, 2026)))
     p.add_argument("--start-mmdd", default="08-24")
@@ -248,6 +315,16 @@ def main() -> None:
     p.add_argument("--output-root", required=True)
     p.add_argument("--config", default="configs/data.yaml")
     p.add_argument("--station-list", default="")
+    p.add_argument(
+        "--allow-incomplete",
+        action="store_true",
+        help="Build with available raw files; missing channels are saved as NaN and logged",
+    )
+    p.add_argument(
+        "--resume-build",
+        action="store_true",
+        help="Reuse finished per-year outputs, but rebuild stale outputs that still log gaps after raw completion",
+    )
     args = p.parse_args()
 
     repo_dir = Path(__file__).resolve().parents[1]
