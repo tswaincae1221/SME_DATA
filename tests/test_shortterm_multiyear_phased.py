@@ -69,10 +69,43 @@ def test_resume_rebuilds_stale_missing_output(tmp_path) -> None:
         (tmp_path / name).write_text("value\n1\n", encoding="utf-8")
 
     (tmp_path / "shortterm_build_missing.csv").write_text("\n", encoding="utf-8")
-    assert phased.yearly_build_is_reusable(tmp_path, source_complete=True)
+    source_status = {
+        "complete": True,
+        "expected_nc": 1456,
+    }
+    assert phased.yearly_build_is_reusable(tmp_path, source_status)
 
     (tmp_path / "shortterm_build_missing.csv").write_text(
         "reason\nold raw gap\n", encoding="utf-8"
     )
-    assert not phased.yearly_build_is_reusable(tmp_path, source_complete=True)
-    assert phased.yearly_build_is_reusable(tmp_path, source_complete=False)
+    assert not phased.yearly_build_is_reusable(tmp_path, source_status)
+    source_status["complete"] = False
+    assert phased.yearly_build_is_reusable(tmp_path, source_status)
+
+
+def test_resume_rejects_empty_labels_and_all_missing_build(tmp_path) -> None:
+    (tmp_path / "shortterm_long.csv").write_text("value\n1\n", encoding="utf-8")
+    (tmp_path / "shortterm_wide.csv").write_text("value\n1\n", encoding="utf-8")
+    (tmp_path / "shortterm_labels_1400.csv").write_text(
+        "Date,STN_ID,TA,HM\n", encoding="utf-8"
+    )
+    (tmp_path / "shortterm_build_missing.csv").write_text(
+        "reason\n" + "raw missing\n" * 1456, encoding="utf-8"
+    )
+    status = {"complete": False, "expected_nc": 1456}
+    assert not phased.yearly_build_is_reusable(tmp_path, status)
+
+
+def test_wrong_drive_root_is_rejected(tmp_path) -> None:
+    statuses = [
+        {
+            "year": 2025,
+            "valid_nc": 12,
+            "expected_nc": 1456,
+            "valid_asos": 0,
+            "expected_asos": 7,
+            "complete": False,
+        }
+    ]
+    with pytest.raises(RuntimeError, match="Google 계정"):
+        phased.validate_build_source_root(statuses, tmp_path)
