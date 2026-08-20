@@ -86,20 +86,40 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def yearly_build_is_reusable(year_dir: Path, source_complete: bool) -> bool:
+def yearly_build_is_reusable(year_dir: Path, source_status: dict) -> bool:
     """Return True only for a finished per-year build that is safe to reuse."""
-    required = (
-        year_dir / "shortterm_long.csv",
-        year_dir / "shortterm_wide.csv",
-        year_dir / "shortterm_labels_1400.csv",
-    )
-    if not all(path.exists() and path.stat().st_size > 1 for path in required):
+    long_df = safe_read_csv(year_dir / "shortterm_long.csv")
+    wide_df = safe_read_csv(year_dir / "shortterm_wide.csv")
+    labels_df = safe_read_csv(year_dir / "shortterm_labels_1400.csv")
+    if not len(long_df) or not len(wide_df) or not len(labels_df):
         return False
 
     # A previous build may have been made before later downloads filled the raw gaps.
     # Rebuild that year so stale NaNs do not remain in otherwise complete source data.
     missing_df = safe_read_csv(year_dir / "shortterm_build_missing.csv")
-    return not (source_complete and len(missing_df) > 0)
+    if bool(source_status["complete"]) and len(missing_df) > 0:
+        return False
+
+    # Never reuse an output created from an empty/wrong Drive root.
+    maximum_reasonable_issues = max(1, int(source_status["expected_nc"]) // 2)
+    return len(missing_df) < maximum_reasonable_issues
+
+
+def validate_build_source_root(statuses: list[dict], output_root: Path) -> None:
+    expected_nc = sum(int(status["expected_nc"]) for status in statuses)
+    valid_nc = sum(int(status["valid_nc"]) for status in statuses)
+    valid_asos = sum(int(status["valid_asos"]) for status in statuses)
+    minimum_nc = max(1, expected_nc // 2)
+    if valid_nc >= minimum_nc and valid_asos > 0:
+        return
+
+    raise RuntimeError(
+        "Phase 2 입력 폴더에 실제 원본이 거의 보이지 않습니다. "
+        f"GK2A={valid_nc}/{expected_nc}, ASOS={valid_asos}, root={output_root}\n"
+        "이 상태에서 계속하면 모든 위성값과 라벨이 비어 있는 CSV가 생성됩니다. "
+        "Colab에서 데이터를 보유한 Google 계정을 마운트했는지, 또는 "
+        "OUTPUT_ROOT가 실제 shortterm_12to14_data 폴더를 가리키는지 확인하세요."
+    )
 
 
 def collect_phase(args, config: dict, repo_dir: Path) -> None:
@@ -177,7 +197,7 @@ def combine_years(args) -> None:
 
     longs, wides, labels, missings = [], [], [], []
     summary = []
-    missing_dataset_years = []
+    missing_dataset_parts: list[str] = []
     for year in args.years:
         d = by_year / str(year)
         long_df = safe_read_csv(d / "shortterm_long.csv")
@@ -191,8 +211,17 @@ def combine_years(args) -> None:
         if len(wide_df): wides.append(wide_df)
         if len(labels_df): labels.append(labels_df)
         if len(missing_df): missings.append(missing_df)
-        if not len(long_df) or not len(wide_df) or not len(labels_df):
-            missing_dataset_years.append(year)
+        empty_parts = [
+            name
+            for name, frame in (
+                ("long", long_df),
+                ("wide", wide_df),
+                ("labels", labels_df),
+            )
+            if not len(frame)
+        ]
+        if empty_parts:
+            missing_dataset_parts.append(f"{year}({','.join(empty_parts)})")
         summary.append({
             "year": year,
             "long_rows": len(long_df),
@@ -203,10 +232,10 @@ def combine_years(args) -> None:
             "HM_missing": int(labels_df["HM"].isna().sum()) if "HM" in labels_df else 0,
         })
 
-    if missing_dataset_years:
+    if missing_dataset_parts:
         raise RuntimeError(
-            "연도별 build 결과가 없어 combined CSV를 만들 수 없습니다: "
-            + ", ".join(map(str, missing_dataset_years))
+            "연도별 build 결과 일부가 비어 있어 combined CSV를 만들 수 없습니다: "
+            + ", ".join(missing_dataset_parts)
         )
 
     year_tag = f"{min(args.years)}to{max(args.years)}"
@@ -237,6 +266,7 @@ def build_phase(args, config: dict, repo_dir: Path) -> None:
     pd.DataFrame(
         [{k: v for k, v in status.items() if k != "missing_examples"} for status in statuses]
     ).to_csv(outputs / "build_preflight_status.csv", index=False)
+    validate_build_source_root(statuses, root)
 
     incomplete = [s for s in statuses if not s["complete"]]
     if incomplete:
@@ -278,7 +308,7 @@ def build_phase(args, config: dict, repo_dir: Path) -> None:
         year_dir.mkdir(parents=True, exist_ok=True)
         print("\n" + "=" * 80, flush=True)
         if args.resume_build and yearly_build_is_reusable(
-            year_dir, bool(status_by_year[year]["complete"])
+            year_dir, status_by_year[year]
         ):
             print(f"[SKIP BUILD] {year}: 기존 연도별 결과를 재사용합니다.", flush=True)
             continue
