@@ -24,13 +24,87 @@ def time_grid(day: pd.Timestamp, start_hhmm: str, end_hhmm: str, step_minutes: i
         current += pd.Timedelta(minutes=step_minutes)
 
 
-def load_label(root: Path, day: pd.Timestamp) -> pd.DataFrame:
+def label_path(root: Path, day: pd.Timestamp) -> Path:
     key = day.replace(hour=14, minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M")
-    path = root / "asos" / "parsed" / f"asos_{key}.csv"
+    return root / "asos" / "parsed" / f"asos_{key}.csv"
+
+
+def load_label(root: Path, day: pd.Timestamp) -> pd.DataFrame:
+    path = label_path(root, day)
     if not path.exists():
         return pd.DataFrame(columns=["STN_ID", "TA", "HM"])
     frame = pd.read_csv(path)
     return frame[["STN_ID", "TA", "HM"]].drop_duplicates("STN_ID", keep="last")
+
+
+def validate_source_root(
+    *,
+    root: Path,
+    raw_root: Path,
+    start: str,
+    end: str,
+    start_time: str,
+    end_time: str,
+    step_minutes: int,
+    channels: list[str],
+    time_basis: str,
+    minimum_source_fraction: float,
+) -> dict[str, int]:
+    expected_nc = 0
+    found_nc = 0
+    expected_labels = 0
+    found_labels = 0
+    missing_examples: list[str] = []
+
+    for day in inclusive_dates(start, end):
+        expected_labels += 1
+        if label_path(root, day).exists():
+            found_labels += 1
+        for ts in time_grid(day, start_time, end_time, step_minutes):
+            requested = api_timestamp(ts, time_basis)
+            for channel in channels:
+                expected_nc += 1
+                path = find_gk2a_file(raw_root, day, channel, requested)
+                if path is not None:
+                    found_nc += 1
+                elif len(missing_examples) < 5:
+                    missing_examples.append(
+                        str(raw_root / day.strftime("%Y/%m/%d") / f"{channel}_{requested}.nc")
+                    )
+
+    print(
+        f"[SOURCE PREFLIGHT] GK2A={found_nc}/{expected_nc}, "
+        f"ASOS={found_labels}/{expected_labels}, root={root}",
+        flush=True,
+    )
+    minimum_nc = max(1, int(expected_nc * minimum_source_fraction))
+    if found_nc < minimum_nc or found_labels == 0:
+        details = "\n".join(f"  - {path}" for path in missing_examples)
+        raise RuntimeError(
+            "입력 폴더에 원본 데이터가 거의 없거나 ASOS 라벨이 없습니다. "
+            f"GK2A={found_nc}/{expected_nc}, ASOS={found_labels}/{expected_labels}\n"
+            f"root={root}\n"
+            "Colab에 데이터를 보유한 Google 계정을 마운트했는지와 "
+            "OUTPUT_ROOT 경로를 확인하세요.\n"
+            + ("missing examples:\n" + details if details else "")
+        )
+    return {
+        "expected_nc": expected_nc,
+        "found_nc": found_nc,
+        "expected_labels": expected_labels,
+        "found_labels": found_labels,
+    }
+
+
+def print_issue_summary(missing_df: pd.DataFrame) -> None:
+    if not len(missing_df):
+        return
+    print("[BUILD ISSUE SUMMARY]", flush=True)
+    counts = missing_df.groupby("reason", dropna=False).size().sort_values(ascending=False)
+    for reason, count in counts.head(10).items():
+        print(f"  {count:4d} | {reason}", flush=True)
+    print("[BUILD ISSUE EXAMPLES]", flush=True)
+    print(missing_df.head(10).to_string(index=False), flush=True)
 
 
 def main() -> None:
@@ -44,7 +118,11 @@ def main() -> None:
     p.add_argument("--start-time", default="12:00")
     p.add_argument("--end-time", default="14:00")
     p.add_argument("--step-minutes", type=int, default=10)
+    p.add_argument("--minimum-source-fraction", type=float, default=0.5)
     args = p.parse_args()
+
+    if not 0.0 < args.minimum_source_fraction <= 1.0:
+        raise ValueError("--minimum-source-fraction은 0보다 크고 1 이하여야 합니다.")
 
     config = load_yaml(args.config)
     project, satellite = config["project"], config["satellite"]
@@ -61,6 +139,18 @@ def main() -> None:
 
     channels = [str(c).upper() for c in satellite["channels"]]
     long_parts, labels_parts, missing = [], [], []
+    preflight = validate_source_root(
+        root=root,
+        raw_root=raw_root,
+        start=args.start,
+        end=args.end,
+        start_time=args.start_time,
+        end_time=args.end_time,
+        step_minutes=args.step_minutes,
+        channels=channels,
+        time_basis=str(satellite["api_time_basis"]),
+        minimum_source_fraction=args.minimum_source_fraction,
+    )
 
     for day in inclusive_dates(args.start, args.end):
         label = load_label(root, day)
@@ -109,10 +199,23 @@ def main() -> None:
     wide_df = pivot.reset_index().merge(stations, on="STN_ID", how="left", validate="m:1")
     wide_df = wide_df.merge(labels_df, on=["Date","STN_ID"], how="left", validate="1:1")
 
+    missing_df = pd.DataFrame(
+        missing, columns=["Date", "TimeKST", "channel", "reason"]
+    )
+    print_issue_summary(missing_df)
+    if len(missing_df) >= max(1, preflight["expected_nc"] // 2):
+        failed_path = out_dir / "shortterm_build_failed_issues.csv"
+        atomic_write_csv(missing_df, failed_path)
+        raise RuntimeError(
+            "절반 이상의 위성 파일이 읽기/특징 추출에 실패했습니다. "
+            "기존 정상 결과를 덮어쓰지 않고 중단합니다. "
+            f"진단 파일: {failed_path}"
+        )
+
     atomic_write_csv(long_df, out_dir / "shortterm_long.csv")
     atomic_write_csv(wide_df, out_dir / "shortterm_wide.csv")
     atomic_write_csv(labels_df, out_dir / "shortterm_labels_1400.csv")
-    atomic_write_csv(pd.DataFrame(missing), out_dir / "shortterm_build_missing.csv")
+    atomic_write_csv(missing_df, out_dir / "shortterm_build_missing.csv")
     print(f"long={long_df.shape}, wide={wide_df.shape}, labels={labels_df.shape}, issues={len(missing)}")
 
 
