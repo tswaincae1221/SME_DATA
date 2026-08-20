@@ -1,0 +1,4 @@
+system,TA_model,HM_model,RMSE_TA,RMSE_HM,competition_score,formula
+before_TA_calibration_plus_HM_raw,TA_PooledOOF,HM_CatResidualRaw,1.9371061339975189,7.205701385188182,2.657676272516337,RMSE_TA + 0.1 * RMSE_HM
+TA_calibrated_plus_HM_raw,TA_LatestOOFCalibrated,HM_CatResidualRaw,1.7230341714438213,7.205701385188182,2.4436043099626397,RMSE_TA + 0.1 * RMSE_HM
+final_selected,TA_LatestOOFCalibrated,HM_SelectedCalibrated,1.7230341714438213,7.205701385188182,2.4436043099626397,RMSE_TA + 0.1 * RMSE_HM
