@@ -43,6 +43,20 @@ for _manifest in glob.glob("/kaggle/input/**/manifest.json", recursive=True):
     except Exception:
         continue
 
+# Kaggle Dataset에 ZIP 한 개만 올린 경우도 지원합니다.
+if not _bundle_candidates:
+    import zipfile
+    _bundle_zips = sorted(glob.glob(
+        "/kaggle/input/**/sme_submission_2026_model_bundle_v1.zip", recursive=True
+    ))
+    if len(_bundle_zips) == 1:
+        _extract_dir = "/kaggle/working/submission_2026_model_bundle"
+        os.makedirs(_extract_dir, exist_ok=True)
+        with zipfile.ZipFile(_bundle_zips[0]) as _archive:
+            _archive.extractall(_extract_dir)
+        if os.path.isfile(os.path.join(_extract_dir, "manifest.json")):
+            _bundle_candidates = [_extract_dir]
+
 if len(_bundle_candidates) != 1:
     raise RuntimeError(
         f"2026 모델 번들은 정확히 하나여야 합니다: {_bundle_candidates}. "
