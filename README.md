@@ -25,6 +25,11 @@ TA residual 모델의 최근 연도 OOF 보정과 HM CatBoost+residual LSTM 베�
 OOF 보정 상수, 규정 입력 검사 결과는 실행 폴더의 `competition_scores.csv`,
 `calibration_recipe.json`, `rule_compliance.json`에 저장된다.
 
+피처 중복 제거 5단계 누적 실험과 다중 시드 확인은
+`notebooks/Colab_Feature_Dedup_Ablation.ipynb`에서 재현할 수 있다. 단계별 결과는
+`cumulative_ablation_metrics.csv`, 다중 시드 결과는
+`multiseed_step0_vs_step3_summary.csv`를 확인한다.
+
 현재 코드는 ASOS 수집부터 날짜 그룹 검증, 모델 저장, `pred`·제출 파일 생성까지 구현되어 있습니다. GK-2A API·파일 시각은 UTC 기준으로 확인해 14:00 KST를 05:00 UTC로 요청하도록 설정했습니다. 위경도→픽셀 변환과 채널별 보정은 KO 표본 파일과 대회 `baseline_notebook.ipynb`로 추가 검증해야 합니다.
 
 ---
